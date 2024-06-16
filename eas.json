@@ -1,0 +1,22 @@
+{
+  "cli": {
+    "version": ">= 9.2.0"
+  },
+  "build": {
+    "development": {
+      "android": {
+        "buildType": "apk",
+        "distribution": "internal"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle",
+        "gradleCommand": ":app:bundleRelease"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

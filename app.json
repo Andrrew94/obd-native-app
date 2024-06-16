@@ -1,5 +1,8 @@
 {
   "expo": {
+    "plugins": [
+      "./config-plugins/withCustomManifest"
+    ],
     "name": "obd-native-app",
     "slug": "obd-native-app",
     "version": "1.0.0",
@@ -12,7 +15,8 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "obd-ios"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,6 +27,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "155b8dbb-cd0c-4887-a8d6-9fdeb5bc2874"
+      }
     }
   }
 }

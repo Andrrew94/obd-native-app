@@ -174,7 +174,7 @@ export const querySupportedPIDs = async (device: Device) => {
 
 export const queryPidValuesMode1 = async (device: Device, supportedPIDs: string[]) => {
   try {
-    const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
+    const { serviceUUID, writableCharacteristicUUID } = await findCharacteristicUUIDs(device);
     const pidValues: Record<string, string> = {};
 
     for (const pid of supportedPIDs) {
@@ -306,11 +306,14 @@ export const queryDTCValues = async (device: Device) => {
   try {
     const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
     
-    await subscribeToNotifications(device, serviceUUID, notifiableCharacteristicUUID);
+    // Unsubscribe from any existing notifications
+    await device.cancelConnection();
+    await device.connect();
+    await device.discoverAllServicesAndCharacteristics();
 
-    const command = '03'; // Mode 3 for retrieving DTCs
-    const response: any = await writeCommand(device, serviceUUID, writableCharacteristicUUID, command);
-    const cleanedResponse = cleanResponse(response);
+    await writeCommandForMode3(device, serviceUUID, writableCharacteristicUUID, '03'); // Mode 3 for retrieving DTCs
+    const response = await subscribeToNotificationsForMode3(device, serviceUUID, notifiableCharacteristicUUID);
+    const cleanedResponse = cleanResponseForMode3(response);
     console.log(`Cleaned response for Mode 3:`, cleanedResponse); // Debug log for cleaned response
 
     return interpretDTCValues(cleanedResponse);
@@ -351,3 +354,49 @@ export const interpretDTCValues = (response: string) => {
 
   return interpretedValues;
 };
+
+const cleanResponseForMode3 = (response: string): string => {
+  // Remove "SEARCHING...", duplicates, and other unexpected parts
+  return response.replace(/SEARCHING\.\.\.|NO DATA|>/g, '').replace(/ +/g, '').trim();
+};
+
+const subscribeToNotificationsForMode3 = async (device: Device, serviceUUID: string, characteristicUUID: string) => {
+  return new Promise<string>((resolve, reject) => {
+    let fullResponse = '';
+
+    device.monitorCharacteristicForService(serviceUUID, characteristicUUID, (error, characteristic) => {
+      if (error) {
+        console.error(`Failed to monitor characteristic: ${error}`);
+        reject(error);
+        return;
+      }
+
+      const value = characteristic?.value;
+      if (value) {
+        const response = decodeBase64(value).trim();
+        console.log(`Received notification: ${response}`);
+        fullResponse += response;
+        if (fullResponse.includes('>')) {
+          waitingForResponse = false;
+          resolve(fullResponse);
+        }
+      }
+    });
+  });
+};
+
+const writeCommandForMode3 = async (device: Device, serviceUUID: string, characteristicUUID: string, command: string) => {
+  return new Promise<void>((resolve, reject) => {
+    const cmd = Buffer.from(`${command}\r`, 'utf-8');
+    console.log(`Sending command: ${command}`);
+    responseBuffer = '';  // Clear the buffer before sending the command
+    waitingForResponse = true;
+
+    device.writeCharacteristicWithResponseForService(serviceUUID, characteristicUUID, cmd.toString('base64'))
+      .then(() => resolve())
+      .catch((error) => {
+        console.error(`Failed to write command ${command}:`, error);
+        reject(error);
+      });
+  });
+}

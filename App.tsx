@@ -33,22 +33,22 @@ const App = () => {
     stopDeviceScan();
     try {
       const connectedDevice = await connectToDevice(device);
-      console.log('Connect to device success');
-      setConnectedDevice(connectedDevice);
       await initializeOBD(connectedDevice);
+      setConnectedDevice(connectedDevice);
+      console.log('Connect to device success');
       // const supportedPIDs: any = await querySupportedPIDs(connectedDevice);
       // console.log('Supported PIDs are', JSON.stringify(supportedPIDs, null, 2));
       // setPids(supportedPIDs);
-      setPids(['0C']);
+      // setPids(['0C']);
 
-      // const pidValues = await queryPidValues(device, supportedPIDs);
-      const pidValues = await queryPidValuesMode1(device, ['0C', '04']);
-      const values = interpretPidValues(pidValues);
-      setInterpretedValues(values);
-      console.log('interpreted values are', JSON.stringify(values, null, 2));
+      // // const pidValues = await queryPidValues(device, supportedPIDs);
+      // const pidValues = await queryPidValuesMode1(device, ['0C', '04']);
+      // const values = interpretPidValues(pidValues);
+      // setInterpretedValues(values);
+      // console.log('interpreted values are', JSON.stringify(values, null, 2));
 
-      const mode3DTCs = await queryDTCValues(connectedDevice);
-      console.log('mode3DTCs', mode3DTCs);
+      // const mode3DTCs = await queryDTCValues(connectedDevice);
+      // console.log('mode3DTCs', mode3DTCs);
       
 
       // const supportedPidsMode9 = await queryMode9SupportedPids(connectedDevice);
@@ -61,6 +61,34 @@ const App = () => {
       Alert.alert('Error', `Error during BLE operation: ${error.message}`);
     }
   };
+
+  const handleMode1 = async () => {
+    try {
+    // const supportedPIDs: any = await querySupportedPIDs(connectedDevice);
+    // console.log('Supported PIDs are', JSON.stringify(supportedPIDs, null, 2));
+    // setPids(supportedPIDs);
+    setPids(['0C', '04']);
+
+    // const pidValues = await queryPidValues(device, supportedPIDs);
+    const pidValues = await queryPidValuesMode1(connectedDevice, ['0C', '04']);
+    const values = interpretPidValues(pidValues);
+    setInterpretedValues(values);
+    console.log('interpreted values are', JSON.stringify(values, null, 2));
+    } catch(error: any) {
+      console.error('Error during Mode 1 operation:', error);
+      Alert.alert('Error', `Error during Mode 1 operation: ${error.message}`);
+    }
+  }
+
+  const handleMode3 = async () => {
+    const mode3DTCs = await queryDTCValues(connectedDevice);
+    console.log('mode3DTCs', mode3DTCs);
+  }
+
+  const handleMode9 = async () => {
+    console.log('calling mode 9');
+    
+  }
 
   const disconnectDevice = async () => {
     try {
@@ -84,9 +112,24 @@ const App = () => {
       <View style={{ marginTop: 15 }}>
         <Button title="Start Scanning" onPress={handleStartScan} />
       </View>
-      <View style={{ marginTop: 15 }}>
-        <Button title="Reset" onPress={handleReset} />
+      {connectedDevice &&
+        <View>
+          <View style={{ marginTop: 15 }}>
+          <Button title="Reset" onPress={handleReset} />
+        </View>
+        <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
+          <View style={{ width: '30%' }}>
+            <Button title="Mode 1" onPress={handleMode1}/>
+          </View>
+          <View style={{ width: '30%' }}>
+            <Button title="Mode 3" onPress={handleMode3} />
+          </View>
+          <View style={{ width: '30%' }}>
+            <Button title="Mode 9" onPress={handleMode9} />
+          </View>
+        </View>
       </View>
+      }
       <SectionList
         sections={sections}
         keyExtractor={(item, index) => item + index}

@@ -23,7 +23,7 @@ console.log('Started scanning for devices');
   setTimeout(() => {
     manager.stopDeviceScan();
     console.log('Stopped scanning for devices');
-  }, 10000); // Stop scanning after 10 seconds
+  }, 5000); // Stop scanning after 10 seconds
 };
 
 export const stopDeviceScan = () => {

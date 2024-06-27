@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, Button, Alert, SectionList } from 'react-native';
 import { requestPermissions } from './utils/Permissions';
 import { scanForDevices, stopDeviceScan, connectToDevice } from './services/BluetoothManager';
-import { initializeOBD, interpretPidValues, queryDTCValues, queryPidValuesMode1 } from './services/OBDService';
+import { findCharacteristicUUIDs, initializeOBD, interpretPidValues, queryDTCValues, queryPidValuesMode1 } from './services/OBDService';
 
 const App = () => {
   const [devices, setDevices] = useState([]);
   const [connectedDevice, setConnectedDevice] = useState<any>(null);
   const [pids, setPids] = useState<any>([]);
   const [interpretedValues, setInterpretedValues] = useState<any>([]);
+  const [ecuHeaders, setEcuHeaders] = useState<any>([]);
 
   useEffect(() => {
     requestPermissions();
@@ -82,7 +83,7 @@ const App = () => {
 
   const handleMode3 = async () => {
     const mode3DTCs = await queryDTCValues(connectedDevice);
-    console.log('mode3DTCs', mode3DTCs);
+    // console.log('mode3DTCs', mode3DTCs);
   }
 
   const handleMode9 = async () => {
@@ -101,6 +102,44 @@ const App = () => {
       Alert.alert('Error', `Error disconnecting from device: ${error.message}`);
     }
   };
+
+  const identifyEcuHeader = (response: any) => {
+    const header: any = response.substring(0, 3);
+    if (!ecuHeaders.includes(header)) {
+      setEcuHeaders((prevHeaders: any) => [...prevHeaders, header]);
+    }
+  };
+
+  const writeCommandTest = async (device: any, serviceUUID: any, characteristicUUID: any, command: any) => {
+    const cmd = Buffer.from(`${command}\r`, 'utf-8').toString('base64');
+    await device.writeCharacteristicWithResponseForService(serviceUUID, characteristicUUID, cmd);
+  };
+
+  const discoverECUs = async () => {
+    if (!connectedDevice) return;
+
+    const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(connectedDevice);
+    const broadcastAddress = '7DF'; // Broadcast to all ECUs
+
+    // Send broadcast request to discover ECUs
+    await writeCommandTest(connectedDevice, serviceUUID, writableCharacteristicUUID, `AT SH ${broadcastAddress}`);
+    await writeCommandTest(connectedDevice, serviceUUID, writableCharacteristicUUID, '01 00');
+
+    // Wait for the responses
+    connectedDevice.monitorCharacteristicForService(serviceUUID, writableCharacteristicUUID, (error: any, characteristic: any) => {
+      if (error) {
+        console.error('Monitor error', error);
+        return;
+      }
+
+      if (characteristic.value) {
+        const response = Buffer.from(characteristic.value, 'base64').toString('ascii').trim();
+        console.log('Response:', response);
+        identifyEcuHeader(response);
+      }
+    });
+  };
+
   const sections = [
     { title: 'Available Devices', data: devices },
     { title: 'Supported PIDs', data: pids },
@@ -128,6 +167,13 @@ const App = () => {
             <Button title="Mode 9" onPress={handleMode9} />
           </View>
         </View>
+        <View>
+            <Text>Discovered ECU Headers:</Text>
+            {ecuHeaders.map((header: any, index: any) => (
+              <Text key={index}>{header}</Text>
+            ))}
+            <Button title="Discover ECUs" onPress={discoverECUs} />
+          </View>
       </View>
       }
       <SectionList

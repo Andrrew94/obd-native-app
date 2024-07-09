@@ -1,42 +1,47 @@
-import { BleManager } from 'react-native-ble-plx';
+import BleManager from 'react-native-ble-manager';
+import { NativeEventEmitter, NativeModules, Platform, PermissionsAndroid } from 'react-native';
 
-const manager = new BleManager();
+const BleManagerModule = NativeModules.BleManager;
+const bleManagerEmitter = new NativeEventEmitter(BleManagerModule);
 
 export const scanForDevices = (setDevices: any) => {
-console.log('Started scanning for devices');
-  manager.startDeviceScan(null, null, (error, device: any) => {
-    if (error) {
-      console.error(error);
-      return;
-    }
-
-    if (device.name) {
-      setDevices((prevDevices: any) => {
-        if (!prevDevices.find((d: any) => d.id === device.id)) {
-          return [...prevDevices, device];
-        }
-        return prevDevices;
-      });
-    }
-  });
-
-  setTimeout(() => {
-    manager.stopDeviceScan();
-    console.log('Stopped scanning for devices');
-  }, 5000); // Stop scanning after 10 seconds
+  BleManager.start({ showAlert: false })
+    .then(() => {
+      BleManager.scan([], 5, true)
+        .then(() => {
+          console.log('Scanning...');
+          bleManagerEmitter.addListener('BleManagerDiscoverPeripheral', (device) => {
+            setDevices((prevDevices: any) => {
+              if (device.name && !prevDevices.some((d: any) => d.id === device.id)) {
+                return [...prevDevices, device];
+              }
+              return prevDevices;
+            });
+          });
+        })
+        .catch((error) => console.error('Error scanning:', error));
+    })
+    .catch((error) => console.error('Error starting BLE manager:', error));
 };
 
 export const stopDeviceScan = () => {
-  manager.stopDeviceScan();
+  BleManager.stopScan()
+    .then(() => {
+      console.log('Scan stopped');
+    })
+    .catch((error) => console.error('Error stopping scan:', error));
 };
 
-export const connectToDevice = async (device: any) => {
-  try {
-    const connectedDevice = await device.connect();
-    await connectedDevice.discoverAllServicesAndCharacteristics();
-    return connectedDevice;
-  } catch (error) {
-    console.error(error);
-    throw error;
-  }
+export const connectToDevice = (device: any) => {
+  return new Promise((resolve, reject) => {
+    BleManager.connect(device.id)
+      .then(() => {
+        console.log('Connected to device:', device.id);
+        resolve(device);
+      })
+      .catch((error) => {
+        console.error('Error connecting to device:', error);
+        reject(error);
+      });
+  });
 };

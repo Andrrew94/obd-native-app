@@ -1,599 +1,543 @@
-import { Device } from 'react-native-ble-plx';
+import BleManager from 'react-native-ble-manager';
+import { NativeEventEmitter, NativeModules } from 'react-native';
 import { Buffer } from 'buffer';
 import { MODE_1_PIDS } from '../PIDS/mode-1-pids';
+import { MODE_9_PIDS } from '../PIDS/mode-9-pids';
 
-let responseBuffer = '';
-let waitingForResponse = false;
-let subscription: any;
-let isMonitoring = false;
-let operationInProgress = false;
+const BleManagerModule = NativeModules.BleManager;
+const bleManagerEmitter = new NativeEventEmitter(BleManagerModule);
 
-// const writeCommand = async (device: Device, serviceUUID: string, characteristicUUID: string, command: string) => {
-//   return new Promise((resolve, reject) => {
-//     const cmd = Buffer.from(`${command}\r`, 'utf-8');
-//     console.log(`Sending command: ${command}`);
-//     responseBuffer = '';  // Clear the buffer before sending the command
-//     waitingForResponse = true;
+export const findCharacteristicUUIDs = async (device: any) => {
+  const services: any = await BleManager.retrieveServices(device.id);
+  let writableCharacteristicUUID = null;
+  let notifiableCharacteristicUUID = null;
+  let serviceUUID = null;
 
-//     device.writeCharacteristicWithResponseForService(serviceUUID, characteristicUUID, cmd.toString('base64'))
-//       .then(() => {
-//         const timeout = setTimeout(() => {
-//           if (waitingForResponse) {
-//             waitingForResponse = false;
-//             console.error('Response timeout');
-//             resolve(responseBuffer);  // Resolve with whatever data was collected
-//           }
-//         }, 5000); // 5 seconds timeout for response
+  for (const characteristic of services.characteristics) {
+    if (characteristic.properties.Write) {
+      writableCharacteristicUUID = characteristic.characteristic;
+      serviceUUID = characteristic.service;
+    }
+    if (characteristic.properties.Notify) {
+      notifiableCharacteristicUUID = characteristic.characteristic;
+      serviceUUID = characteristic.service;
+    }
+  }
 
-//         const checkResponse = () => {
-//           if (!waitingForResponse) {
-//             clearTimeout(timeout);
-//             resolve(responseBuffer);
-//           } else {
-//             setTimeout(checkResponse, 100);  // Check again after 100ms
-//           }
-//         };
-//         checkResponse();
-//       })
-//       .catch((error) => {
-//         console.error(`Failed to write command ${command}:`, error);
-//         reject(error);
-//       });
-//   });
-// };
+  if (!writableCharacteristicUUID) {
+    throw new Error('Writable characteristic not found');
+  }
 
-// const subscribeToNotifications = async (device: Device, serviceUUID: string, characteristicUUID: string) => {
-//   return new Promise<void>((resolve, reject) => {
-//     device.monitorCharacteristicForService(serviceUUID, characteristicUUID, (error, characteristic) => {
-//       if (error) {
-//         console.error(`Failed to monitor characteristic: ${error}`);
-//         reject(error);
-//         return;
-//       }
+  return { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID };
+};
 
-//       const value = characteristic?.value;
-//       if (value) {
-//         const response = decodeBase64(value).trim();
-//         console.log(`Received notification: ${response}`);
-//         responseBuffer += response;
-//         if (response.endsWith('>')) {
-//           waitingForResponse = false;
-//         }
-//       }
-//     });
+export const initializeOBD = async (device: any) => {
+  let subscription;
+  let serviceUUID;
+  let writableCharacteristicUUID;
+  let notifiableCharacteristicUUID;
+  let responseBuffer = '';
+  let responseReceived = false;
 
-//     resolve();
-//   });
-// };
+  try {
+    console.log('Initialize OBD adapter - start');
 
-const writeCommand = async (device: Device, serviceUUID: string, writableCharacteristicUUID: string, command: string) => {
-    return new Promise((resolve, reject) => {
-      operationInProgress = true;
-      const cmd = Buffer.from(`${command}\r`, 'utf-8');
-      console.log(`Sending command: ${command}`);
-      responseBuffer = '';  // Clear the buffer before sending the command
-  
-      device.writeCharacteristicWithResponseForService(serviceUUID, writableCharacteristicUUID, cmd.toString('base64'))
-        .then(() => {
-          console.log(`Command ${command} written successfully`);
-  
+    const characteristics = await findCharacteristicUUIDs(device);
+    serviceUUID = characteristics.serviceUUID;
+    writableCharacteristicUUID = characteristics.writableCharacteristicUUID;
+    notifiableCharacteristicUUID = characteristics.notifiableCharacteristicUUID;
+
+    if (notifiableCharacteristicUUID) {
+      await BleManager.startNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+
+      subscription = bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+        const response = Buffer.from(value).toString('ascii').trim();
+        console.log('Received notification:', response);
+
+        // Append to the response buffer
+        responseBuffer += response;
+
+        // Check if the response includes the terminator
+        if (response.includes('>')) {
+          responseReceived = true;
+        }
+      });
+
+      const commands = [
+        { command: 'ATZ', description: 'Reset OBD-II adapter' },
+        { command: 'ATSP0', description: 'Set protocol to auto' },
+        { command: 'ATE0', description: 'Turn off echo' },
+        { command: 'ATL0', description: 'Turn off line feed' },
+        { command: 'ATS0', description: 'Turn off spaces' },
+        { command: 'ATH0', description: 'Turn off headers' },
+        // { command: 'ATDP', description: 'Identify protocol' },
+        // { command: 'ATAT1', description: ' The Adaptive Timing is a feature that automatically adjusts the time between the OBD requests and the expected responses based on the performance of the ECU. This helps in optimizing the communication speed.' },
+      ];
+
+      for (const { command, description } of commands) {
+        // Reset buffer and response flag for each command
+        responseBuffer = '';
+        responseReceived = false;
+
+        const commandBuffer = Buffer.from(`${command}\r`, 'utf-8').toJSON().data;
+        console.log(`Sending command: ${command}`);
+
+        await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
+
+        // Wait for the response
+        await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
-            console.error(`Response timeout for command: ${command}`);
-            operationInProgress = false;
-            resolve(responseBuffer);  // Resolve with whatever data was collected
+            if (!responseReceived) {
+              reject(new Error('Response timeout'));
+            }
           }, 5000); // 5 seconds timeout for response
-  
+
           const checkResponse = () => {
-            if (responseBuffer.endsWith('>')) {
+            if (responseReceived) {
               clearTimeout(timeout);
-              operationInProgress = false;
-              resolve(responseBuffer);
+              resolve();
+            } else {
+              setTimeout(checkResponse, 100); // Check again after 100ms
+            }
+          };
+          checkResponse();
+        });
+
+        console.log(`Response for ${command}: ${responseBuffer}`);
+
+        // Introduce a delay after sending ATE0 command
+        if (command === 'ATE0') {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds delay to ensure echo is disabled
+        }
+      }
+
+      console.log('Initialization commands sent with success');
+    }
+  } catch (error) {
+    console.error('Failed to initialize OBD adapter:', error);
+  } finally {
+    if (subscription) {
+      subscription.remove();
+      await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+      console.log('Unsubscribed from notifications after initialization');
+    }
+  }
+};
+
+export const subscribeToNotifications = (deviceId: any, serviceUUID: any, characteristicUUID: any) => {
+  return new Promise((resolve, reject) => {
+    bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+      const response = Buffer.from(value).toString('ascii').trim();
+      console.log(`Received notification: ${response}`);
+      resolve(response);
+    });
+
+    BleManager.startNotification(deviceId, serviceUUID, characteristicUUID)
+      .then(() => {
+        console.log('Notification started');
+      })
+      .catch((error) => {
+        console.error('Failed to start notification:', error);
+        reject(error);
+      });
+  });
+};
+
+export const queryPidValuesMode1 = async (device: any, pids: any) => {
+  let subscription;
+  let responseBuffer = '';
+  let responseReceived = false;
+
+  let serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID;
+
+  try {
+    ({ serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device));
+
+    await BleManager.startNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+
+    subscription = bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+      const response = Buffer.from(value).toString('ascii').trim();
+      console.log('Received notification:', response);
+
+      // Append to the response buffer
+      responseBuffer += response;
+
+      // Check if the response includes the terminator
+      if (response.includes('>')) {
+        responseReceived = true;
+      }
+    });
+
+    const results = [];
+
+    for (const pid of pids) {
+      responseBuffer = '';
+      responseReceived = false;
+
+      const command = `01${pid}`;
+      const commandBuffer = Buffer.from(`${command}\r`, 'utf-8').toJSON().data;
+      console.log(`Sending Mode 1 command: ${command}`);
+
+      await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
+
+      // Wait for the response
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          if (!responseReceived) {
+            reject(new Error('Response timeout'));
+          }
+        }, 5000); // 5 seconds timeout for response
+
+        const checkResponse = () => {
+          if (responseReceived) {
+            clearTimeout(timeout);
+            resolve();
+          } else {
+            setTimeout(checkResponse, 100); // Check again after 100ms
+          }
+        };
+        checkResponse();
+      });
+
+      // Filter out irrelevant parts from the response buffer
+      const cleanedResponse = cleanResponse(responseBuffer);
+      console.log('Cleaned Response', cleanedResponse);
+
+      try {
+        const parsedResponse = parseMode1Response(cleanedResponse);
+        console.log('Processed response:', parsedResponse);
+        results.push(parsedResponse);
+      } catch (error) {
+        console.error('Failed to parse response:', error);
+        console.error('Failed to process response:', cleanedResponse);
+      }
+    }
+
+    return results;
+  } catch (error) {
+    console.error('Error during Mode 1 query:', error);
+  } finally {
+    if (subscription) {
+      subscription.remove();
+      await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+      console.log('Unsubscribed from notifications after Mode 1 queries');
+    }
+  }
+};
+
+const cleanResponse = (response: string): string => {
+  // Remove "SEARCHING...", duplicates, and other unexpected parts
+  return response.replace(/SEARCHING\.\.\.|NO DATA|>/g, '').replace(/ +/g, '').trim();
+};
+
+const parseMode1Response = (response: any) => {
+  const match = response.match(/^41(\w{2})(.*)/);
+  if (!match) {
+    throw new Error(`Unexpected response mode: ${response.slice(0, 2)}`);
+  }
+
+  const pid = match[1];
+  const data = match[2];
+  const pidDefinition = MODE_1_PIDS[pid];
+
+  if (!pidDefinition) {
+    throw new Error(`Unknown PID: ${pid}`);
+  }
+
+  const dataBytes = [];
+  for (let i = 0; i < data.length; i += 2) {
+    dataBytes.push(parseInt(data.substring(i, i + 2), 16));
+  }
+
+  const result = pidDefinition.Formula(...dataBytes);
+  return {
+    pid: pidDefinition.PID,
+    description: pidDefinition.Description,
+    unit: pidDefinition.Unit,
+    data: result
+  };
+};
+
+const interpretMode9Values = (response: string) => {
+  const values: any = [];
+  const pid = '02';  // VIN PID
+
+  if (response.includes('NO DATA')) {
+    console.log('No data available for this request');
+    return values;
+  }
+
+  // Look for all VIN parts in the response
+  const vinMatches = response.matchAll(/(\d+): ([0-9A-Fa-f]+)/g);
+  
+  for (const match of vinMatches) {
+    const [, partNumberStr, vinHex] = match;
+    const partNumber = parseInt(partNumberStr, 10);
+    
+    // Remove the '4902' prefix if present
+    const cleanedVinHex = vinHex.replace(/^4902/, '');
+    
+    const vinPartialBytes = cleanedVinHex.match(/.{2}/g)?.map(byte => parseInt(byte, 16)) || [];
+    const { Unit, Formula } = MODE_9_PIDS[pid];
+    const partialVin = Formula(...vinPartialBytes);
+    
+    values.push({
+      pid,
+      description: `VIN Part ${partNumber}`,
+      unit: Unit,
+      data: partialVin,
+      note: `Partial VIN - Part ${partNumber}`,
+      partNumber
+    });
+  }
+
+  if (values.length === 0) {
+    console.error('VIN data not found in response');
+  }
+
+  return values;
+};
+
+const assembleVIN = (vinParts: any[]) => {
+  // Sort the parts by their part number and remove duplicates
+  const uniqueParts = vinParts.reduce((acc, current) => {
+    const x = acc.find((item: any) => item.partNumber === current.partNumber);
+    if (!x) {
+      return acc.concat([current]);
+    } else {
+      return acc;
+    }
+  }, []);
+  
+  uniqueParts.sort((a: any, b: any) => a.partNumber - b.partNumber);
+
+  // Concatenate the parts
+  let fullVin = uniqueParts.map((part: any) => part.data).join('');
+
+  // Remove any non-alphanumeric characters
+  fullVin = fullVin.replace(/[^A-Z0-9]/gi, '');
+
+  // Ensure the VIN is exactly 17 characters long
+  fullVin = fullVin.slice(0, 17);
+  console.log('Final assembled VIN:', fullVin);
+
+  return fullVin;
+};
+
+export const queryMode9ForVin = async (device: any) => {
+  console.log('=== Starting Mode 9 Query for VIN ===');
+  let subscription;
+  let responseBuffer: string = '';
+  let responseReceived = false;
+  let serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID;
+
+  try {
+    ({ serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device));
+    await BleManager.startNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+
+    subscription = bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+      const chunk = Buffer.from(value).toString('ascii');
+      console.log(`Received notification:`, chunk);
+      responseBuffer += chunk;
+
+      if (chunk.includes('>')) {
+        responseReceived = true;
+        console.log('Response complete');
+      }
+    });
+
+    const results = [];
+    // const commands = ['0902', '0902 1', '0902 2', '0902 3'];  // Multiple commands to get full VIN
+    const commands = ['0902'];  // Multiple commands to get full VIN
+
+    for (const command of commands) {
+      responseBuffer = '';
+      responseReceived = false;
+
+      const commandBuffer = Buffer.from(`${command}\r`, 'utf-8').toJSON().data;
+      console.log('Sending command:', command);
+      await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
+
+      // Wait for the response
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            if (!responseReceived) {
+              console.log('Response timeout');
+              reject(new Error('Response timeout'));
+            }
+          }, 10000);  // 10 seconds timeout for response
+
+          const checkResponse = () => {
+            if (responseReceived) {
+              clearTimeout(timeout);
+              resolve();
             } else {
               setTimeout(checkResponse, 100);  // Check again after 100ms
             }
           };
           checkResponse();
-        })
-        .catch((error) => {
-          console.error(`Failed to write command ${command}:`, error);
-          operationInProgress = false;
-          reject(error);
         });
-    });
-  };
 
-  const startMonitoring = (device: any, serviceUUID: any, notifiableCharacteristicUUID: any) => {
-      return new Promise<void>((resolve, reject) => {
-        console.log(`Subscribing to notifications for ${notifiableCharacteristicUUID}`);
-        subscription = device.monitorCharacteristicForService(serviceUUID, notifiableCharacteristicUUID, (error: any, characteristic: any) => {
-          if (error) {
-            console.error('Failed to monitor characteristic:', error);
-            reject(error);
-            return;
-          }
-    
-          const value = characteristic?.value;
-          if (value) {
-            const response = decodeBase64(value).trim();
-            console.log(`Received notification: ${response}`);
-            responseBuffer += response;
-          }
-        });
-        isMonitoring = true;
-        resolve();
-        console.log('Subscription initialized');
+        const parsedResponse = interpretMode9Values(responseBuffer);
+        results.push(...parsedResponse);
+      } catch (error) {
+        console.error('Error processing command:', command, error);
+      }
+    }
+
+    // Assemble the full VIN
+    const vinParts = results.filter(r => r.pid === '02');
+    if (vinParts.length > 0) {
+      const fullVin = assembleVIN(vinParts);
+      console.log('Assembled full VIN:', fullVin);
+      results.push({
+        pid: '02',
+        description: 'Vehicle Identification Number (VIN)',
+        unit: '',
+        data: fullVin
       });
-    };
-    
-    const stopMonitoring = async () => {
-      // Wait until no operation is in progress
-      while (operationInProgress) {
-        console.log('Waiting for current operation to complete...');
-        await delay(100);
-      }
-      
-      if (subscription) {
-        try {
-          console.log('Attempting to remove subscription...');
-          subscription.remove();
-          subscription = null;
-          isMonitoring = false;
-          console.log('Subscription removed successfully');
-        } catch (err) {
-          console.error('Failed to remove subscription:', err);
-        }
-      }
-    };
+    } else {
+      console.log('No VIN parts found to assemble');
+    }
 
-const subscribeToNotifications = async (device: Device, serviceUUID: string, characteristicUUID: string) => {
-    return new Promise<void>((resolve, reject) => {
-      console.log(`Subscribing to notifications for ${characteristicUUID}`);
-      const subscription = device.monitorCharacteristicForService(serviceUUID, characteristicUUID, (error, characteristic) => {
-        if (error) {
-          console.error(`Failed to monitor characteristic: ${error}`);
-          reject(error);
-          return;
+    console.log('=== Mode 9 Query VIN Complete ===');
+    return results;
+  } catch (error) {
+    console.error('Error during Mode 9 query:', error);
+  } finally {
+    if (subscription) {
+      subscription.remove();
+      await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+      console.log('Unsubscribed from notifications after Mode 9 queries');
+    }
+  }
+};
+
+export const queryMode3 = async (device: any) => {
+  let subscription;
+  let responseBuffer = '';
+  let responseReceived = false;
+
+  let serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID;
+
+  try {
+    ({ serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device));
+
+    await BleManager.startNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+
+    subscription = bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+      const response = Buffer.from(value).toString('ascii');
+      console.log('Received notification:', response);
+
+      // Append to the response buffer
+      responseBuffer += response;
+
+      // Check if the response is complete (ends with '>')
+      if (response.includes('>')) {
+        responseReceived = true;
+      }
+    });
+
+    responseBuffer = '';
+    responseReceived = false;
+
+    const command = '03';
+    const commandBuffer = Buffer.from(`${command}\r`, 'ascii').toJSON().data;
+    console.log(`Sending Mode 3 command: ${command}`);
+
+    await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
+
+    // Wait for the response
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!responseReceived) {
+          reject(new Error('Response timeout'));
         }
+      }, 5000); // 5 seconds timeout for response
+
+      const checkResponse = () => {
+        if (responseReceived) {
+          clearTimeout(timeout);
+          resolve();
+        } else {
+          setTimeout(checkResponse, 100); // Check again after 100ms
+        }
+      };
+      checkResponse();
+    });
+
+    // Clean the response buffer
+    const cleanedResponse = cleanResponseMode3(responseBuffer);
+    console.log('Cleaned response:', cleanedResponse);
+
+    // Interpret the DTC values
+    const interpretedValues = interpretDTCValues(cleanedResponse);
+    console.log('Interpreted DTC values:', interpretedValues);
+
+    return interpretedValues;
+  } catch (error) {
+    console.error('Error during Mode 3 query:', error);
+  } finally {
+    if (subscription) {
+      subscription.remove();
+      await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+      console.log('Unsubscribed from notifications after Mode 3 queries');
+    }
+  }
+};
+
+const cleanResponseMode3 = (response: any) => {
+  // Remove "SEARCHING..." and other non-data parts
+  let cleaned = response.replace(/SEARCHING\.\.\./g, '')
+                        .replace(/7F0031/g, '')  // Remove this error code if present
+                        .replace(/\d+:\s*/g, '')
+                        .replace(/[\r\n>]/g, '')
+                        .trim();
   
-        console.log('Characteristic subscription successful:', characteristic);
-        
-        const value = characteristic?.value;
-        if (value) {
-          const response = decodeBase64(value).trim();
-          console.log(`Received notification: ${response}`);
-          responseBuffer += response;
-          if (response.endsWith('>')) {
-            subscription.remove();
-            resolve();
-          }
-        }
-      });
-      console.log('Subscription initialized');
-      resolve();
-    });
-  };
-
-
-const decodeBase64 = (base64String: string): string => {
-  return Buffer.from(base64String, 'base64').toString('utf-8');
-};
-
-const parseSupportedPIDs = (response: string): string[] => {
-  console.log('Raw response:', response); // Debug log for raw response
-  const pids: string[] = [];
-  const hexString = response.replace(/[^0-9A-F]/gi, ''); // Remove any non-hex characters
-  console.log('Hex string:', hexString); // Log the cleaned-up hex string
-
-  if (hexString.length < 8) return []; // If response is too short, skip parsing
-
-  for (let i = 0; i < hexString.length; i += 2) {
-    const byte = parseInt(hexString.slice(i, i + 2), 16);
-    for (let bit = 0; bit < 8; bit++) {
-      if (byte & (1 << (7 - bit))) {
-        const pid = (i * 4 + bit + 1).toString(16).toUpperCase().padStart(2, '0');
-        pids.push(pid);
-      }
-    }
+  // Ensure the response starts with '43'
+  const dataStart = cleaned.indexOf('43');
+  if (dataStart !== -1) {
+    cleaned = cleaned.substring(dataStart);
   }
-  return pids;
-};
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-export const findCharacteristicUUIDs = async (device: Device) => {
-  const services = await device.services();
-
-  for (const service of services) {
-    const characteristics = await device.characteristicsForService(service.uuid);
-    let writableCharacteristicUUID = '';
-    let notifiableCharacteristicUUID = '';
-    let readableCharacteristicUUID = '';
-
-    characteristics.forEach((characteristic) => {
-      // if (characteristic.isWritableWithResponse) {
-      if (characteristic.isWritableWithResponse) {
-        writableCharacteristicUUID = characteristic.uuid;
-      }
-      if (characteristic.isNotifiable) {
-        notifiableCharacteristicUUID = characteristic.uuid;
-      }
-      if (characteristic.isReadable) {
-        readableCharacteristicUUID = characteristic.uuid;
-      }
-    });
-
-    if (writableCharacteristicUUID && notifiableCharacteristicUUID && readableCharacteristicUUID) {
-      console.log(`Service UUID: ${service.uuid}`);
-      console.log(`Writable Characteristic UUID: ${writableCharacteristicUUID}`);
-      console.log(`Notifiable Characteristic UUID: ${notifiableCharacteristicUUID}`);
-      console.log(`Readable Characteristic UUID: ${readableCharacteristicUUID}`);
-      return { serviceUUID: service.uuid, writableCharacteristicUUID, notifiableCharacteristicUUID, readableCharacteristicUUID };
-    }
-  }
-  throw new Error('Suitable characteristics not found');  
-};
-
-const cleanResponse = (response: string): string => {
-  // Remove "SEARCHING..." and other unexpected parts
-  return response.replace(/SEARCHING\.\.\.|NO DATA|>/g, '').trim();
-};
-
-// export const initializeOBD = async (device: Device) => {
-//   try {
-//     console.log('Initialize OBD adapter');
-//     const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-
-//     await subscribeToNotifications(device, serviceUUID, notifiableCharacteristicUUID);
-
-//     const initCommands = [
-//       'ATZ',    // Reset the OBD-II adapter
-//       'ATE0',   // Turn off echo
-//       'ATL0',   // Turn off line feed
-//       'ATS0',   // Turn off spaces
-//       'ATH0',   // Turn off headers
-//       'ATSP0',  // Set protocol to auto
-//       // 'AT DP', // identify the current protocol, for now i only got the "AUTO" response
-//       // 'AT SH 7E0' // Set header to listen only to the engine ECU
-//     ];
-
-//     for (const command of initCommands) {
-//       await writeCommand(device, serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID, command);
-//       await delay(500); // Increase delay to ensure the device processes the command
-//     }
-
-//     console.log('Initialization commands sent with success');
-//   } catch (error) {
-//     console.error('Failed to initialize OBD adapter:', error);
-//     throw error;
-//   }
-// };
-
-export const initializeOBD = async (device: any) => {
-  try {
-    console.log('Initialize OBD adapter');
-    const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-
-    console.log(`Service UUID: ${serviceUUID}`);
-    console.log(`Writable Characteristic UUID: ${writableCharacteristicUUID}`);
-    console.log(`Notifiable Characteristic UUID: ${notifiableCharacteristicUUID}`);
-
-    if (!isMonitoring) {
-      await startMonitoring(device, serviceUUID, notifiableCharacteristicUUID);
-    }
-
-    const initCommands = [
-      'ATZ',    // Reset the OBD-II adapter
-      'ATE0',   // Turn off echo
-      'ATL0',   // Turn off line feed
-      'ATS0',   // Turn off spaces
-      'ATH0',   // Turn off headers
-      'ATSP0',  // Set protocol to auto
-      // 'AT DP', // identify the current protocol, for now I only got the "AUTO" response
-      // 'AT SH 7E0' // Set header to listen only to the engine ECU
-    ];
-
-    for (const command of initCommands) {
-      const response = await writeCommand(device, serviceUUID, writableCharacteristicUUID, command);
-      console.log(`Response for ${command}: ${response}`);
-      await delay(500); // Increase delay to ensure the device processes the command
-    }
-
-    console.log('Initialization commands sent with success');
-  } catch (error) {
-    console.error('Failed to initialize OBD adapter:', error);
-    throw error;
-  }
-};
-
-export const querySupportedPIDs = async (device: Device) => {
-  try {
-    const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-    const pids = ['0100', '0120', '0140', '0160', '0180', '01A0'];
-
-    let supportedPIDs: string[] = [];
-
-    for (const pid of pids) {
-      const response: any = await writeCommand(device, serviceUUID, writableCharacteristicUUID, pid);
-      const cleanedResponse = cleanResponse(response);
-      console.log(`Cleaned response for PID ${pid}:`, cleanedResponse); // Debug log for cleaned response
-      const parsedPIDs = parseSupportedPIDs(cleanedResponse);
-      supportedPIDs = [...supportedPIDs, ...parsedPIDs];
-    }
-
-    return Array.from(new Set(supportedPIDs)); // Remove duplicates
-  } catch (error) {
-    console.error('Failed to query supported PIDs:', error);
-    throw error;
-  }
-};
-
-export const queryPidValuesMode1 = async (device: Device, supportedPIDs: string[]) => {
-  try {
-    const { serviceUUID, writableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-    const pidValues: Record<string, string> = {};
-
-    for (const pid of supportedPIDs) {
-      // todo: clean this up, make a specific function that calls mode 1 adapter
-      const response: any = await writeCommand(device, serviceUUID, writableCharacteristicUUID, `01${pid}`);
-      console.log('response from write command', response);
-      
-      const cleanedResponse = cleanResponse(response);
-      console.log(`Cleaned response for PID ${pid}:`, cleanedResponse); // Debug log for cleaned response
-      pidValues[pid] = cleanedResponse;
-    }
-
-    return pidValues;
-  } catch (error) {
-    console.error('Failed to query PID values:', error);
-    throw error;
-  }
-};
-
-export const queryPidValuesMode9 = async (device: Device, supportedPIDs: string[]) => {
-  try {
-    const { serviceUUID, writableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-    const pidValues: Record<string, string> = {};
-
-    for (const pid of supportedPIDs) {
-      // todo: clean this up, make a specific function that calls mode 1 adapter
-      const response: any = await writeCommand(device, serviceUUID, writableCharacteristicUUID, `09${pid}`);
-      console.log('response from write command', response);
-      
-      const cleanedResponse = cleanResponse(response);
-      console.log(`Cleaned response for PID ${pid}:`, cleanedResponse); // Debug log for cleaned response
-      pidValues[pid] = cleanedResponse;
-    }
-
-    return pidValues;
-  } catch (error) {
-    console.error('Failed to query PID values:', error);
-    throw error;
-  }
-};
-
-export const queryMode9SupportedPids = async (device: Device) => {
-  try {
-    const { serviceUUID, writableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-    const response: any = await writeCommand(device, serviceUUID, writableCharacteristicUUID, '0900');
-    const supportedPids = [];
-
-    if (response) {
-      const match = response.match(/49[0-9A-F]{2}([0-9A-F]{8})/);
-      if (match) {
-        const bytes = Buffer.from(match[1], 'hex');
-        for (let j = 0; j < 4; j++) {
-          const byte = bytes.readUInt8(j);
-          for (let k = 0; k < 8; k++) {
-            if (byte & (1 << (7 - k))) {
-              supportedPids.push(`${(j * 8 + k).toString(16).padStart(2, '0')}`);
-            }
-          }
-        }
-      }
-    }
   
-    return supportedPids;
-    
-  } catch (error) {
-    console.error('Failed to query MODE 9 with error:', error);
-    throw error;
-  }
+  return cleaned;
 };
 
-export const interpretPidValues = (pidValues: { [pid: string]: string }) => {
-  const interpretedValues = [];
-
-  for (const [pid, rawValue] of Object.entries(pidValues)) {
-    console.log('pid values are', pidValues);
-    
-    const pidInfo = MODE_1_PIDS[pid.toUpperCase()];
-    
-    if (!pidInfo) {
-      console.warn(`PID info not found for ${pid}`);
-      continue;
-    }
-
-    if (rawValue.includes('NODATA')) {
-      console.log(`PID: ${pid}, Raw Value: ${rawValue} (No Data)`);
-      interpretedValues.push({
-        pid: pid,
-        description: pidInfo.Description,
-        unit: pidInfo.Unit,
-        value: null
-      });
-      continue;
-    }
-
-    console.log('pidValues inside interpret Pid Values', pidValues);
-    
-    // Remove '41' and PID part from the response, keep only data part
-    const cleanedValue = rawValue.replace(/[\s>]/g, '').substring(4);
-
-    console.log('CLEANING RAW VALUE', cleanedValue);
-    
-    const byteValues = [];
-    for (let i = 0; i < cleanedValue.length; i += 2) {
-      byteValues.push(parseInt(cleanedValue.substring(i, i + 2), 16));
-    }
-
-    console.log(`PID: ${pid}, Raw Value: ${rawValue}, Cleaned Value: ${cleanedValue}, Byte Values: ${byteValues.join(',')}`);
-
-    try {
-      const formula = pidInfo.Formula;
-      const formulaArgs = formula.length;
-      const value = formula.apply(null, byteValues.slice(0, formulaArgs));
-
-      interpretedValues.push({
-        pid: pid,
-        description: pidInfo.Description,
-        unit: pidInfo.Unit,
-        value: value
-      });
-    } catch (error) {
-      console.error(`Error interpreting PID ${pid}:`, error);
-    }
-  }
-
-  return interpretedValues;
-}
-
-// export const queryDTCValues = async (device: Device) => {
-//   const { serviceUUID, writableCharacteristicUUID, readableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-//   const cmd = Buffer.from(`${'03'}\r`, 'utf-8');
-
-//   try {
-//     await device.writeCharacteristicWithResponseForService(
-//       serviceUUID,
-//       writableCharacteristicUUID,
-//       cmd.toString('base64')
-//     );
-
-//     const characteristic: any = await device.readCharacteristicForService(
-//       serviceUUID,
-//       readableCharacteristicUUID
-//     );
-
-//     const decodedValue = Buffer.from(characteristic.value, 'base64').toString('hex');
-//     console.log('Decoded read value:', decodedValue);
-//     console.log('readCharacteristicForService response', characteristic);
-//   } catch (error: any) {
-//     console.log('Error is', error.message);
-//   }
-
-export const queryDTCValues = async (device: Device) => {
-  const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-  responseBuffer = '';
-  waitingForResponse = true;
-
-  try {
-    await writeCommand(device, serviceUUID, writableCharacteristicUUID, '03');
-
-    // Wait until the response ends with '>'
-    while (waitingForResponse) {
-      await delay(100);
-    }
-
-    console.log('Full response received:', responseBuffer);
-    // Parse the full response here
-  } catch (error: any) {
-    console.log('Error querying DTC values:', error.message);
-  }
-};
-
-  // try {
-    // const { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device);
-    
-  //   // Unsubscribe from any existing notifications
-  //   await device.cancelConnection();
-  //   await device.connect();
-  //   await device.discoverAllServicesAndCharacteristics();
-
-  //   await writeCommandForMode3(device, serviceUUID, writableCharacteristicUUID, '03'); // Mode 3 for retrieving DTCs
-  //   const response = await subscribeToNotificationsForMode3(device, serviceUUID, notifiableCharacteristicUUID);
-  //   const cleanedResponse = cleanResponseForMode3(response);
-  //   console.log(`Cleaned response for Mode 3:`, cleanedResponse); // Debug log for cleaned response
-
-  //   return interpretDTCValues(cleanedResponse);
-  // } catch (error) {
-  //   console.error('Failed to query DTC values:', error);
-  //   throw error;
-  // }
-// };
-
-export const interpretDTCValues = (response: string) => {
+const interpretDTCValues = (response: any) => {
   const interpretedValues = [];
 
   if (response.startsWith('43')) {
-    const cleanedResponse = response.replace(/[\s>]/g, '').substring(2); // Remove '43' and clean the response
+    const data = response.substring(2);
+    const numDTCs = parseInt(data.substring(0, 2), 16);
+    console.log(`Number of DTCs: ${numDTCs}`);
 
-    for (let i = 0; i < cleanedResponse.length; i += 4) {
-      const dtc = cleanedResponse.substring(i, i + 4);
-      if (dtc.length === 4) {
-        const system = dtc[0];
-        const faultCode = dtc.slice(1);
+    const dtcData = data.substring(2);
+    const dtcCodes = dtcData.match(/.{4}/g) || [];
 
-        let systemCode;
-        switch (system) {
-          case '0': case '1': systemCode = 'P'; break; // Powertrain
-          case '2': case '3': systemCode = 'C'; break; // Chassis
-          case '4': case '5': systemCode = 'B'; break; // Body
-          case '6': case '7': systemCode = 'U'; break; // Network
-          default: systemCode = ''; break;
-        }
+    for (let i = 0; i < numDTCs && i < dtcCodes.length; i++) {
+      const dtc = dtcCodes[i];
+      if (dtc !== '0000') {
+        const firstByte = parseInt(dtc.substring(0, 2), 16);
+        const secondByte = parseInt(dtc.substring(2, 4), 16);
 
-        const fullDTC = `${systemCode}${faultCode}`;
+        const type = ['P', 'C', 'B', 'U'][firstByte >> 6];
+        const firstChar = (firstByte >> 4) & 0x03;
+        const secondChar = firstByte & 0x0F;
+        const thirdChar = secondByte >> 4;
+        const fourthChar = secondByte & 0x0F;
+
+        const fullDTC = `${type}${firstChar}${secondChar.toString(16).toUpperCase()}${thirdChar.toString(16).toUpperCase()}${fourthChar.toString(16).toUpperCase()}`;
         interpretedValues.push(fullDTC);
       }
     }
+
+    if (interpretedValues.length < numDTCs) {
+      console.warn(`Warning: Only ${interpretedValues.length} out of ${numDTCs} DTCs were interpreted. The response may be incomplete.`);
+    }
   } else {
-    console.error('Unexpected response for Mode 3:', response);
+    console.error('Unexpected response format for Mode 3:', response);
   }
 
   return interpretedValues;
 };
-
-const cleanResponseForMode3 = (response: string): string => {
-  // Remove "SEARCHING...", duplicates, and other unexpected parts
-  return response.replace(/SEARCHING\.\.\.|NO DATA|>/g, '').replace(/ +/g, '').trim();
-};
-
-const subscribeToNotificationsForMode3 = async (device: Device, serviceUUID: string, characteristicUUID: string) => {
-  return new Promise<string>((resolve, reject) => {
-    let fullResponse = '';
-
-    device.monitorCharacteristicForService(serviceUUID, characteristicUUID, (error, characteristic) => {
-      if (error) {
-        console.error(`Failed to monitor characteristic: ${error}`);
-        reject(error);
-        return;
-      }
-
-      const value = characteristic?.value;
-      if (value) {
-        const response = decodeBase64(value).trim();
-        console.log(`Received notification: ${response}`);
-        fullResponse += response;
-        if (fullResponse.includes('>')) {
-          waitingForResponse = false;
-          resolve(fullResponse);
-        }
-      }
-    });
-  });
-};
-
-const writeCommandForMode3 = async (device: Device, serviceUUID: string, characteristicUUID: string, command: string) => {
-  return new Promise<void>((resolve, reject) => {
-    const cmd = Buffer.from(`${command}\r`, 'utf-8');
-    console.log(`Sending command: ${command}`);
-    responseBuffer = '';  // Clear the buffer before sending the command
-    waitingForResponse = true;
-
-    device.writeCharacteristicWithResponseForService(serviceUUID, characteristicUUID, cmd.toString('base64'))
-      .then(() => resolve())
-      .catch((error) => {
-        console.error(`Failed to write command ${command}:`, error);
-        reject(error);
-      });
-  });
-}

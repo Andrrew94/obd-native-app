@@ -74,7 +74,7 @@ export const initializeOBD = async (device: any) => {
         // { command: 'ATAT1', description: ' The Adaptive Timing is a feature that automatically adjusts the time between the OBD requests and the expected responses based on the performance of the ECU. This helps in optimizing the communication speed.' },
       ];
 
-      for (const { command, description } of commands) {
+      for (const { command } of commands) {
         // Reset buffer and response flag for each command
         responseBuffer = '';
         responseReceived = false;
@@ -107,7 +107,7 @@ export const initializeOBD = async (device: any) => {
 
         // Introduce a delay after sending ATE0 command
         if (command === 'ATE0') {
-          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds delay to ensure echo is disabled
+          await new Promise(resolve => setTimeout(resolve, 1000)); // delay to ensure echo is disabled
         }
       }
 
@@ -414,7 +414,7 @@ export const queryMode9ForVin = async (device: any) => {
   }
 };
 
-export const queryMode3 = async (device: any) => {
+export const queryDTC = async (device: any, command: '03' | '07' | '0A') => {
   let subscription;
   let responseBuffer = '';
   let responseReceived = false;
@@ -442,9 +442,8 @@ export const queryMode3 = async (device: any) => {
     responseBuffer = '';
     responseReceived = false;
 
-    const command = '03';
     const commandBuffer = Buffer.from(`${command}\r`, 'ascii').toJSON().data;
-    console.log(`Sending Mode 3 command: ${command}`);
+    console.log(`Sending DTC query command: ${command}`);
 
     await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
 
@@ -468,26 +467,26 @@ export const queryMode3 = async (device: any) => {
     });
 
     // Clean the response buffer
-    const cleanedResponse = cleanResponseMode3(responseBuffer);
+    const cleanedResponse = cleanResponseForDTCS(responseBuffer, command);
     console.log('Cleaned response:', cleanedResponse);
 
     // Interpret the DTC values
-    const interpretedValues = interpretDTCValues(cleanedResponse);
+    const interpretedValues = interpretDTCValues(cleanedResponse, command);
     console.log('Interpreted DTC values:', interpretedValues);
 
     return interpretedValues;
   } catch (error) {
-    console.error('Error during Mode 3 query:', error);
+    console.error('Error during DTC query:', error);
   } finally {
     if (subscription) {
       subscription.remove();
       await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
-      console.log('Unsubscribed from notifications after Mode 3 queries');
+      console.log(`Unsubscribed from notifications for command ${command}`);
     }
   }
 };
 
-const cleanResponseMode3 = (response: any) => {
+const cleanResponseForDTCS = (response: any, mode: '03' | '07' | '0A') => {
   // Remove "SEARCHING..." and other non-data parts
   let cleaned = response.replace(/SEARCHING\.\.\./g, '')
                         .replace(/7F0031/g, '')  // Remove this error code if present
@@ -495,8 +494,22 @@ const cleanResponseMode3 = (response: any) => {
                         .replace(/[\r\n>]/g, '')
                         .trim();
   
-  // Ensure the response starts with '43'
-  const dataStart = cleaned.indexOf('43');
+  let headerValue;
+
+  switch(mode) {
+    case '03':
+      headerValue = '43';
+      break;
+    case '07':
+      headerValue = '47';
+      break;
+    case '0A':
+      headerValue = '4A';
+      break;
+  }
+
+  // Ensure the response starts with mode header value ex: 43, 47, 4A
+  const dataStart = cleaned.indexOf(headerValue);
   if (dataStart !== -1) {
     cleaned = cleaned.substring(dataStart);
   }
@@ -504,13 +517,30 @@ const cleanResponseMode3 = (response: any) => {
   return cleaned;
 };
 
-const interpretDTCValues = (response: any) => {
+const interpretDTCValues = (response: string, mode: '03' | '07' | '0A') => {
   const interpretedValues = [];
+  let modeIdentifier;
+  let dtcType;
 
-  if (response.startsWith('43')) {
+  switch(mode) {
+    case '03':
+      modeIdentifier = '43';
+      dtcType = 'stored';
+      break;
+    case '07':
+      modeIdentifier = '47';
+      dtcType = 'pending';
+      break;
+    case '0A':
+      modeIdentifier = '4A';
+      dtcType = 'permanent';
+      break;
+  }
+
+  if (response.startsWith(modeIdentifier)) {
     const data = response.substring(2);
     const numDTCs = parseInt(data.substring(0, 2), 16);
-    console.log(`Number of DTCs: ${numDTCs}`);
+    console.log(`Number of ${dtcType} DTCs: ${numDTCs}`);
 
     const dtcData = data.substring(2);
     const dtcCodes = dtcData.match(/.{4}/g) || [];
@@ -533,11 +563,88 @@ const interpretDTCValues = (response: any) => {
     }
 
     if (interpretedValues.length < numDTCs) {
-      console.warn(`Warning: Only ${interpretedValues.length} out of ${numDTCs} DTCs were interpreted. The response may be incomplete.`);
+      console.warn(`Warning: Only ${interpretedValues.length} out of ${numDTCs} ${dtcType} DTCs were interpreted. The response may be incomplete.`);
     }
   } else {
-    console.error('Unexpected response format for Mode 3:', response);
+    console.error(`Unexpected response format for Mode ${mode}:`, response);
   }
 
   return interpretedValues;
+};
+
+export const clearDTCs = async (device: any) => {
+  let subscription;
+  let responseBuffer = '';
+  let responseReceived = false;
+
+  let serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID;
+
+  try {
+    ({ serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID } = await findCharacteristicUUIDs(device));
+
+    await BleManager.startNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+
+    subscription = bleManagerEmitter.addListener('BleManagerDidUpdateValueForCharacteristic', ({ value }) => {
+      const response = Buffer.from(value).toString('ascii');
+      console.log('Received notification:', response);
+
+      // Append to the response buffer
+      responseBuffer += response;
+
+      // Check if the response is complete (ends with '>')
+      if (response.includes('>')) {
+        responseReceived = true;
+      }
+    });
+
+    responseBuffer = '';
+    responseReceived = false;
+
+    const command = '04';
+    const commandBuffer = Buffer.from(`${command}\r`, 'ascii').toJSON().data;
+    console.log('Sending clear DTCs command: 04');
+
+    await BleManager.write(device.id, serviceUUID, writableCharacteristicUUID, commandBuffer);
+
+    // Wait for the response
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!responseReceived) {
+          reject(new Error('Response timeout'));
+        }
+      }, 5000); // 5 seconds timeout for response
+
+      const checkResponse = () => {
+        if (responseReceived) {
+          clearTimeout(timeout);
+          resolve();
+        } else {
+          setTimeout(checkResponse, 100); // Check again after 100ms
+        }
+      };
+      checkResponse();
+    });
+
+    // Process the response
+    const cleanedResponse = responseBuffer.replace(/[\r\n>]/g, '').trim();
+    console.log('Cleaned response:', cleanedResponse);
+
+    if (cleanedResponse.includes('44')) {
+      console.log('DTCs cleared successfully');
+      return { success: true, message: 'DTCs cleared successfully' };
+    } else {
+      console.error('Failed to clear DTCs');
+      return { success: false, message: 'Failed to clear DTCs', response: cleanedResponse };
+    }
+
+  } catch (error: any) {
+    console.error('Error during clear DTCs operation:', error);
+    return { success: false, message: 'Error during clear DTCs operation', error: error.message };
+  } finally {
+    if (subscription) {
+      subscription.remove();
+      await BleManager.stopNotification(device.id, serviceUUID, notifiableCharacteristicUUID);
+      console.log('Unsubscribed from notifications after clear DTCs operation');
+    }
+  }
 };

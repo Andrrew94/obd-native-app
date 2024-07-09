@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, Button, Alert, SectionList } from 'react-native';
 import { scanForDevices, stopDeviceScan, connectToDevice } from './services/BluetoothManager';
-import { initializeOBD, queryMode3, queryMode9ForVin, queryPidValuesMode1 } from './services/OBDService';
+import { clearDTCs, initializeOBD, queryDTC, queryMode9ForVin, queryPidValuesMode1 } from './services/OBDService';
 import { requestPermissions } from './utils/Permissions';
 import BleManager from 'react-native-ble-manager';
 
@@ -55,13 +55,60 @@ const App = () => {
     }
   };
 
+  // TODO: emulator does not support mode 2
+  // const handleMode2 = async () => {
+  //   try {
+  //     const pids = ['02', '03', '04', '05', '06', '07', '0C', '0D'];
+  //     const mode2Response = await queryPidValuesMode2(connectedDevice, pids);
+  //     console.log('mode 2 response', mode2Response);
+      
+  //   } catch (error: any) {
+  //     console.error('Error during Mode 1 operation:', error);
+  //     Alert.alert('Error', `Error during Mode 1 operation: ${error.message}`);
+  //   }
+  // };
+
   const handleMode3 = async () => {
     try {
-      const mode3DTCs = await queryMode3(connectedDevice);
+      const mode3DTCs = await queryDTC(connectedDevice, '03');
       console.log('mode3DTCs', mode3DTCs);
     } catch (error: any) {
       console.error('Error during Mode 3 operation:', error);
       Alert.alert('Error', `Error during Mode 3 operation: ${error.message}`);
+    }
+  };
+
+  const handleClearDTCs = async () => {
+    try {
+      const result = await clearDTCs(connectedDevice);
+      if (result.success) {
+        Alert.alert('Success', result.message);
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error) {
+      console.error('Error in handleClearDTCs:', error);
+      Alert.alert('Error', 'Failed to clear DTCs');
+    }
+  };
+
+  const handleMode7 = async () => {
+    try {
+      const mode7DTCs = await queryDTC(connectedDevice, '07');
+      console.log('mode7DTCs', mode7DTCs);
+    } catch (error: any) {
+      console.error('Error during Mode 7 operation:', error);
+      Alert.alert('Error', `Error during Mode 3 operation: ${error.message}`);
+    }
+  };
+  
+  const handleModeA = async () => {
+    try {
+      const modeADTCs = await queryDTC(connectedDevice, '0A');
+      console.log('modeADTCs', modeADTCs);
+    } catch (error: any) {
+      console.error('Error during Mode 0A operation:', error);
+      Alert.alert('Error', `Error during Mode 0A operation: ${error.message}`);
     }
   };
 
@@ -116,7 +163,7 @@ const App = () => {
       </View>
       {connectedDevice &&
         <View>
-        { <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
+        <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
             <View style={{ width: '30%' }}>
               <Button title="Mode 1" onPress={handleMode1}/>
             </View>
@@ -124,10 +171,20 @@ const App = () => {
               <Button title="Mode 3" onPress={handleMode3} />
             </View>
             <View style={{ width: '30%' }}>
+              <Button title="Clear DTCs" onPress={handleClearDTCs} />
+            </View>
+          </View> 
+          <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
+            <View style={{ width: '30%' }}>
+              <Button title="Mode 7" onPress={handleMode7}/>
+            </View>
+            <View style={{ width: '30%' }}>
+              <Button title="Mode A" onPress={handleModeA} />
+            </View>
+            <View style={{ width: '30%' }}>
               <Button title="GET VIN" onPress={handleMode9} />
             </View>
           </View> 
-        }
         </View>
       }
       {carVin && 

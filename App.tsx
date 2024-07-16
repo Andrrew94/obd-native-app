@@ -1,217 +1,196 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Button, Alert, SectionList } from 'react-native';
-import { scanForDevices, stopDeviceScan, connectToDevice } from './services/BluetoothManager';
-import { clearDTCs, initializeOBD, queryDTC, queryMode9ForVin, queryPidValuesMode1 } from './services/OBDService';
-import { requestPermissions } from './utils/Permissions';
-import BleManager from 'react-native-ble-manager';
+import { requestPermissions } from './src/utils/Permissions';
+import { BluetoothService } from './src/services/BluetoothService';
+import { OBDService } from './src/services/OBDService';
+import { DeviceList } from './src/components/DeviceList';
+import { OBDControls } from './src/components/OBDControls';
+import { View, Text, Button, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import CheckBox from '@react-native-community/checkbox';
 
-const App = () => {
-  const [devices, setDevices] = useState<any>([]);
-  const [connectedDevice, setConnectedDevice] = useState<any>(null);
-  const [pids, setPids] = useState<any>([]);
-  const [interpretedValues, setInterpretedValues] = useState<any>([]);
-  const [carVin, setCarVin] = useState<any>('');
+const App: React.FC = () => {
+  const [devices, setDevices] = useState<any[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  const [activeTab, setActiveTab] = useState('liveData');
+  const [rpmChecked, setRpmChecked] = useState(false);
+  const [speedChecked, setSpeedChecked] = useState(false);
+  const [showLiveData, setShowLiveData] = useState(false);
+  const [liveData, setLiveData] = useState<any>({ rpm: [], speed: [] });
+  const [isLiveDataRunning, setIsLiveDataRunning] = useState(false);
+
+  const handleStartLiveData = async () => {
+    setShowLiveData(true);
+    setIsLiveDataRunning(true);
+    try {
+      await OBDService.startLiveData((data) => {
+        setLiveData((prevData: any) => ({
+          rpm: [...prevData.rpm, data.rpm],
+          speed: [...prevData.speed, data.speed]
+        }));
+      });
+    } catch (error) {
+      console.error('Failed to start live data:', error);
+      setIsLiveDataRunning(false);
+    }
+  };
 
   useEffect(() => {
     requestPermissions();
   }, []);
 
   const handleStartScan = () => {
-    setDevices([]); // Clear the current device list
-    scanForDevices(setDevices);
-  };
-
-  const handleReset = async () => {
-    if (connectedDevice) {
-      await disconnectDevice();
-    }
-    setDevices([]);
-    setConnectedDevice(null);
-    setPids([]);
-    setInterpretedValues([]);
+    BluetoothService.scanForDevices(setDevices);
   };
 
   const handleConnectToDevice = async (device: any) => {
-    stopDeviceScan();
+    setIsConnecting(true);
     try {
-      const connectedDevice = await connectToDevice(device);
-      await initializeOBD(connectedDevice);
-      setConnectedDevice(connectedDevice);
+      await OBDService.connectAndInitialize(device);
+      setIsConnected(true);
+      // Alert.alert('Success', 'Connected and initialized successfully');
     } catch (error: any) {
-      console.error('Error during BLE operation:', error);
-      Alert.alert('Error', `Error during BLE operation: ${error.message}`);
+      console.error('Error connecting to device:', error);
+      Alert.alert('Error', `Failed to connect: ${error.message}`);
+    } finally {
+      setIsConnecting(false);
     }
   };
 
-  const handleMode1 = async () => {
+  const handleReset = async () => {
     try {
-      const pids = ['0C', '04']; // Example PIDs for RPM and Engine Load
-      const mode1PidResponse = await queryPidValuesMode1(connectedDevice, pids);
-      console.log('mode1PidResponse', mode1PidResponse);
-      
+      console.log('Resetting connection...');
+      await OBDService.disconnect();
+      BluetoothService.stopDeviceScan();
+      setDevices([]);
+      setIsConnected(false);
+      setIsConnecting(false);
+      console.log('Reset complete');
+      Alert.alert('Reset', 'All connections have been reset');
     } catch (error: any) {
-      console.error('Error during Mode 1 operation:', error);
-      Alert.alert('Error', `Error during Mode 1 operation: ${error.message}`);
+      console.error('Error during reset:', error);
+      Alert.alert('Error', `Failed to reset: ${error.message}`);
     }
   };
-
-  // TODO: emulator does not support mode 2
-  // const handleMode2 = async () => {
-  //   try {
-  //     const pids = ['02', '03', '04', '05', '06', '07', '0C', '0D'];
-  //     const mode2Response = await queryPidValuesMode2(connectedDevice, pids);
-  //     console.log('mode 2 response', mode2Response);
-      
-  //   } catch (error: any) {
-  //     console.error('Error during Mode 1 operation:', error);
-  //     Alert.alert('Error', `Error during Mode 1 operation: ${error.message}`);
-  //   }
-  // };
-
-  const handleMode3 = async () => {
-    try {
-      const mode3DTCs = await queryDTC(connectedDevice, '03');
-      console.log('mode3DTCs', mode3DTCs);
-    } catch (error: any) {
-      console.error('Error during Mode 3 operation:', error);
-      Alert.alert('Error', `Error during Mode 3 operation: ${error.message}`);
-    }
-  };
-
-  const handleClearDTCs = async () => {
-    try {
-      const result = await clearDTCs(connectedDevice);
-      if (result.success) {
-        Alert.alert('Success', result.message);
-      } else {
-        Alert.alert('Error', result.message);
-      }
-    } catch (error) {
-      console.error('Error in handleClearDTCs:', error);
-      Alert.alert('Error', 'Failed to clear DTCs');
-    }
-  };
-
-  const handleMode7 = async () => {
-    try {
-      const mode7DTCs = await queryDTC(connectedDevice, '07');
-      console.log('mode7DTCs', mode7DTCs);
-    } catch (error: any) {
-      console.error('Error during Mode 7 operation:', error);
-      Alert.alert('Error', `Error during Mode 3 operation: ${error.message}`);
-    }
-  };
-  
-  const handleModeA = async () => {
-    try {
-      const modeADTCs = await queryDTC(connectedDevice, '0A');
-      console.log('modeADTCs', modeADTCs);
-    } catch (error: any) {
-      console.error('Error during Mode 0A operation:', error);
-      Alert.alert('Error', `Error during Mode 0A operation: ${error.message}`);
-    }
-  };
-
-  const handleMode9 = async () => {
-    setCarVin('')
-    try {
-      // BIG TODO: if you query mode 1 or mode 9 consecutively, sometimes the answers are valid and complete, sometimes errors and missing info, we need retry mechanism based on detecting errors 
-      // TODO: we need to call 0901 to get the number of chunks needed to retrieve the VIN, that applies for 04 and 06 pids from mode 9 too
-      // note for TODO above: discovered that our code is working with only calling 0902, withot the 0902 1, 0902 2 etc.. need to investigate why
-      // const queryMode9forVinChunks = await queryVinChunks(connectedDevice, ['01']);
-      // console.log('queryMode9forVinChunks', queryMode9forVinChunks);
-      
-      const carVinArr: any = await queryMode9ForVin(connectedDevice);
-      if (carVinArr[carVinArr.length - 1].data.length === 17) {
-        setCarVin(carVinArr[carVinArr.length - 1].data);
-      } else {
-        setCarVin(`Invalid vin detected ${carVinArr[carVinArr.length - 1].data}`);
-      }
-     
-      // console.log('CAR VIN', carVinArr[carVinArr.length - 1]);
-    } catch (error: any) {
-      console.error('Error during Mode 9 operation:', error);
-      Alert.alert('Error', `Error during Mode 9 operation: ${error.message}`);
-    }
-  };
-
-  const disconnectDevice = async () => {
-    try {
-      if (connectedDevice) {
-        await BleManager.disconnect(connectedDevice.id);
-        console.log('Disconnected from device');
-      }
-    } catch (error: any) {
-      console.error('Error disconnecting from device:', error);
-      Alert.alert('Error', `Error disconnecting from device: ${error.message}`);
-    }
-  };
-
-  const sections = [
-    { title: 'Available Devices', data: devices },
-    { title: 'Supported PIDs', data: pids },
-    { title: 'Interpreted Values', data: interpretedValues.map((item: any) => `${item.description}: ${item.value} ${item.unit}`) },
-  ];
 
   return (
-    <View style={{ flex: 1, marginTop: 40 }}>
-      <View style={{ marginTop: 15 }}>
-        <Button title="Start Scanning" onPress={handleStartScan} />
-      </View>
-      <View style={{ marginTop: 15 }}>
-          <Button title="Reset" onPress={handleReset} />
-      </View>
-      {connectedDevice &&
-        <View>
-        <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
-            <View style={{ width: '30%' }}>
-              <Button title="Mode 1" onPress={handleMode1}/>
-            </View>
-            <View style={{ width: '30%' }}>
-              <Button title="Mode 3" onPress={handleMode3} />
-            </View>
-            <View style={{ width: '30%' }}>
-              <Button title="Clear DTCs" onPress={handleClearDTCs} />
-            </View>
-          </View> 
-          <View style={{ marginTop: 15, display: 'flex', flexDirection: 'row', justifyContent: 'space-between' }}>
-            <View style={{ width: '30%' }}>
-              <Button title="Mode 7" onPress={handleMode7}/>
-            </View>
-            <View style={{ width: '30%' }}>
-              <Button title="Mode A" onPress={handleModeA} />
-            </View>
-            <View style={{ width: '30%' }}>
-              <Button title="GET VIN" onPress={handleMode9} />
-            </View>
-          </View> 
+    <View style={styles.container}>
+      <View style={styles.buttonContainer}>
+        <View style={{ flex: 1, marginRight: 15 }}>
+          <Button
+            title="Start Scan" 
+            onPress={handleStartScan} 
+            disabled={isConnecting || isConnected}
+          />
         </View>
-      }
-      {carVin && 
-        <View style={{ marginTop: 10 }}>
-          <Text>Vin number: {carVin}</Text>
+        <View style={{ flex: 1 }}>
+          <Button 
+            title="Reset" 
+            onPress={handleReset} 
+            color="red"
+          />
         </View>
-      }
-      <SectionList
-        sections={sections}
-        keyExtractor={(item, index) => item + index}
-        renderItem={({ item, section }: any) => {
-          if (section.title === 'Available Devices') {
-            return (
-              <Text onPress={() => handleConnectToDevice(item)}>
-                {item.name}
-              </Text>
-            );
-          } else {
-            return <Text>{item}</Text>;
-          }
-        }}
-        renderSectionHeader={({ section: { title } }) => (
-          <Text style={{ fontWeight: 'bold', fontSize: 18, marginTop: 15 }}>{title}</Text>
-        )}
-      />
+      </View>
+      {isConnecting && <Text>Connecting...</Text>}
+      <DeviceList devices={devices} onConnect={handleConnectToDevice} />
+      {isConnected && (
+        <View style={styles.tabContainer}>
+          <TouchableOpacity 
+            style={[styles.tab, activeTab === 'liveData' && styles.activeTab]} 
+            onPress={() => setActiveTab('liveData')}
+          >
+            <Text>Live Data</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.tab, activeTab === 'diagnose' && styles.activeTab]} 
+            onPress={() => setActiveTab('diagnose')}
+          >
+            <Text>Diagnose</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {isConnected && activeTab === 'liveData' && (
+        <View style={styles.liveDataContainer}>
+          <View style={styles.checkboxContainer}>
+            <CheckBox
+              value={rpmChecked}
+              onValueChange={setRpmChecked}
+            />
+            <Text>RPM</Text>
+          </View>
+          <View style={styles.checkboxContainer}>
+            <CheckBox
+              value={speedChecked}
+              onValueChange={setSpeedChecked}
+            />
+            <Text>Speed</Text>
+          </View>
+          <Button 
+            title="Start Live Data" 
+            onPress={handleStartLiveData}
+          />
+          {showLiveData && (
+            <View style={styles.graphContainer}>
+              {rpmChecked && (
+                <View style={styles.graph}>
+                  <Text>RPM Graph</Text>
+                  {/* Add your RPM graph component here */}
+                </View>
+              )}
+              {speedChecked && (
+                <View style={styles.graph}>
+                  <Text>Speed Graph</Text>
+                  {/* Add your Speed graph component here */}
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+      )}
+      {isConnected && activeTab === 'diagnose' && <OBDControls />}
     </View>
   );
 };
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 20,
+    marginTop: 20,
+  },
+  buttonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 20,
+  },
+  tabContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginVertical: 10,
+  },
+  tab: {
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#ccc',
+  },
+  activeTab: {
+    backgroundColor: '#ddd',
+  },
+  liveDataContainer: {
+    marginTop: 10,
+  },
+  checkboxContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  graphContainer: {
+    marginTop: 20,
+  },
+  graph: {
+    marginBottom: 20,
+    // Add more styling for your graphs
+  },
+});
 
 export default App;

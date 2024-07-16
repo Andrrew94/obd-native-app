@@ -13,19 +13,36 @@ export const findCharacteristicUUIDs = async (device: any) => {
   let notifiableCharacteristicUUID = null;
   let serviceUUID = null;
 
-  for (const characteristic of services.characteristics) {
-    if (characteristic.properties.Write) {
-      writableCharacteristicUUID = characteristic.characteristic;
-      serviceUUID = characteristic.service;
-    }
-    if (characteristic.properties.Notify) {
-      notifiableCharacteristicUUID = characteristic.characteristic;
-      serviceUUID = characteristic.service;
+  // Look for a service with both writable and notifiable characteristics
+  for (const service of services.services) {
+    const characteristics = services.characteristics.filter((c: any) => c.service === service.uuid);
+    const writableChar = characteristics.find((c: any) => c.properties.Write || c.properties.WriteWithoutResponse);
+    const notifiableChar = characteristics.find((c: any) => c.properties.Notify);
+
+    if (writableChar && notifiableChar) {
+      serviceUUID = service.uuid;
+      writableCharacteristicUUID = writableChar.characteristic;
+      notifiableCharacteristicUUID = notifiableChar.characteristic;
+      break;
     }
   }
 
-  if (!writableCharacteristicUUID) {
-    throw new Error('Writable characteristic not found');
+  // If not found, fall back to separate writable and notifiable characteristics
+  if (!serviceUUID) {
+    for (const characteristic of services.characteristics) {
+      if (characteristic.properties.Write || characteristic.properties.WriteWithoutResponse) {
+        writableCharacteristicUUID = characteristic.characteristic;
+        serviceUUID = characteristic.service;
+      }
+      if (characteristic.properties.Notify) {
+        notifiableCharacteristicUUID = characteristic.characteristic;
+        if (!serviceUUID) serviceUUID = characteristic.service;
+      }
+    }
+  }
+
+  if (!writableCharacteristicUUID || !notifiableCharacteristicUUID) {
+    throw new Error('Required characteristics not found');
   }
 
   return { serviceUUID, writableCharacteristicUUID, notifiableCharacteristicUUID };
@@ -517,7 +534,7 @@ const cleanResponseForDTCS = (response: any, mode: '03' | '07' | '0A') => {
   return cleaned;
 };
 
-const interpretDTCValues = (response: string, mode: '03' | '07' | '0A') => {
+const interpretDTCValues = (response: string, mode: '03' | '07' | '0A') => {  
   const interpretedValues = [];
   let modeIdentifier;
   let dtcType;
